@@ -11,7 +11,7 @@ interface ActiveRequests {
   stop(): ActiveRequests;
 }
 
-const activeRequests: ActiveRequests = {
+const activeRequests: ActiveRequests = (typeof window === 'undefined' ? null : (window as any).activeRequests) || {
   get count() { return this.fetchRequests.length + this.xhrRequests.length; },
   fetchRequests: [],
   xhrRequests: [],
