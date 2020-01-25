@@ -1,4 +1,8 @@
-interface ActiveRequests {
+export type RequestType = 'xhr'|'fetch';
+
+export type RequestHandler = (req: XMLHttpRequest|Promise<Response>, type: RequestType, timestamp: number) => void;
+
+export interface ActiveRequests {
   count: number;
   fetchRequests: Promise<Response>[];
   xhrRequests: XMLHttpRequest[];
@@ -7,9 +11,22 @@ interface ActiveRequests {
     debug: boolean;
     timeout: number;
   };
+  requestStartHandlers: {
+    xhr: { [id: number]: RequestHandler };
+    fetch: { [id: number]: RequestHandler };
+    generic: { [id: number]: RequestHandler };
+  }
+  requestEndHandlers: {
+    xhr: { [id: number]: RequestHandler };
+    fetch: { [id: number]: RequestHandler };
+    generic: { [id: number]: RequestHandler };
+  }
   start(settings: Partial<ActiveRequests['settings']>): ActiveRequests;
   stop(): ActiveRequests;
+  onRequestStart(callback: RequestHandler, options: { type?: RequestType }): number
+  onRequestEnd(callback: RequestHandler, options: { type?: RequestType }): number
 }
+let requestHandlerId = 0;
 
 const activeRequests: ActiveRequests = (typeof window === 'undefined' ? null : (window as any).activeRequests) || {
   get count() { return this.fetchRequests.length + this.xhrRequests.length; },
@@ -32,7 +49,35 @@ const activeRequests: ActiveRequests = (typeof window === 'undefined' ? null : (
     window.fetch = originalFetch;
     this.running = false;
     return this;
-  }
+  },
+  requestStartHandlers: {
+    xhr: {},
+    fetch: {},
+    generic: {},
+  },
+  requestEndHandlers: {
+    xhr: {},
+    fetch: {},
+    generic: {},
+  },
+  onRequestStart(callback: RequestHandler, options: { type?: RequestType } = {}): number {
+    const id = ++requestHandlerId;
+    const handlers = this.requestStartHandlers[options.type || 'generic'];
+    Object.assign(handlers, { [id]: callback });
+    return id;
+  },
+  onRequestEnd(callback: RequestHandler, options: { type?: RequestType } = {}): number {
+    const id = ++requestHandlerId;
+    const handlers = this.requestEndHandlers[options.type || 'generic'];
+    Object.assign(handlers, { [id]: callback });
+    return id;
+  },
+  removeListener(id: number): void {
+    (['xhr', 'fetch', 'generic'] as const).forEach((reqType) => {
+      delete this.requestStartHandlers[reqType][id];
+      delete this.requestEndHandlers[reqType][id];
+    });
+  },
 };
 
 type Args<T extends (...args: any[]) => any> = T extends (...args: infer U) => any ? U : never;
@@ -43,31 +88,49 @@ const logger = (message: string, instance: any, ...args: any[]): void => {
   console.log(punctuatedMessage, `${activeRequests.count} requests currently active. Instance:`, instance, ...args);
 };
 
-const addRequest = (options: { xhr: XMLHttpRequest }|{ fetch: Promise<Response> }): number => {
-  if ('xhr' in options) {
+const addRequest = (options: { xhr: XMLHttpRequest, fetch?: undefined }|{ fetch: Promise<Response>, xhr?: undefined }): number => {
+  const reqType = options.xhr ? 'xhr' : 'fetch';
+  const req = options[reqType]!;
+  const time = new Date().getTime();
+
+  const handle = (handler: RequestHandler): void => handler(req, reqType, time);
+
+  if (options.xhr) {
     logger("XMLHttpRequest started", options.xhr);
     activeRequests.xhrRequests.push(options.xhr);
+    Object.values(activeRequests.requestStartHandlers.xhr).forEach(handle);
   } else {
     logger("Fetch started", options.fetch);
     activeRequests.fetchRequests.push(options.fetch);
+    Object.values(activeRequests.requestStartHandlers.fetch).forEach(handle);
   }
+
+  Object.values(activeRequests.requestStartHandlers.generic).forEach(handle);
 
   const { timeout } = activeRequests.settings;
   return timeout <= 0 ? 0 : window.setTimeout(() => removeRequest(options, true), timeout);
 };
 
-const removeRequest = (options: { xhr: XMLHttpRequest }|{ fetch: Promise<Response> }, timedOut = false): void => {
+const removeRequest = (options: { xhr: XMLHttpRequest, fetch?: undefined }|{ fetch: Promise<Response>, xhr?: undefined }, timedOut = false): void => {
   const remove = <T>(item: T, list: T[]): boolean => {
     const index = list.indexOf(item);
     if (index >= 0) { list.splice(index, 1); return true; }
     return false;
   }
 
-  const [req, reqDescription, removed] = 'xhr' in options
-    ? [options.xhr, 'XMLHttpRequest', remove(options.xhr, activeRequests.xhrRequests)]
-    : [options.fetch, 'Native fetch', remove(options.fetch, activeRequests.fetchRequests)];
+  const [req, reqType, removed] = options.xhr
+    ? [options.xhr, 'xhr', remove(options.xhr, activeRequests.xhrRequests)] as const
+    : [options.fetch, 'fetch', remove(options.fetch, activeRequests.fetchRequests)] as const;
 
-  logger(`${reqDescription} ${timedOut ? 'timed out' : 'finished'}${removed ? '' : ' (but already removed from tracking)'}`, req);
+  if (removed) {
+    const time = new Date().getTime();
+    const handle = (handler: RequestHandler): void => handler(req, reqType, time);
+    const specificHandlers = activeRequests.requestEndHandlers[reqType];
+    const genericHandlers = activeRequests.requestEndHandlers.generic;
+    Object.values({ ...specificHandlers, ...genericHandlers }).forEach(handle);
+  }
+
+  logger(`${reqType === 'xhr' ? 'XMLHttpRequest' : 'Native fetch'} ${timedOut ? 'timed out' : 'finished'}${removed ? '' : ' (but already removed from tracking)'}`, req);
 };
 
 const originalXhrSend = XMLHttpRequest.prototype.send;
