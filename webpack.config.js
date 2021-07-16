@@ -26,7 +26,7 @@ module.exports = {
     // as it loads. If, instead, the library is being imported into another
     // script as part of a build process, it will not run the `start()` method
     // until the author explicitly calls `activeRequests.start()`.
-    globalObject: 'typeof window !== "undefined" ? setTimeout(() => activeRequests.start(), 0) && this : this',
+    globalObject: 'setTimeout(function() { typeof window !== "undefined" && typeof window.activeRequests !== "undefined" && window.activeRequests.start() }, 0) && self || self',
     path: path.resolve(__dirname, 'dist'),
   },
 };
